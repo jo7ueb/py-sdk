@@ -3,6 +3,7 @@ import base64
 from .types import (
     DisplayableIdentity, IdentityClientOptions, CertificateFieldNameUnder50Bytes, OriginatorDomainNameStringUnder250Bytes
 )
+from .contacts_manager import ContactsManager
 from bsv.wallet.wallet_interface import WalletInterface
 
 class IdentityClient:
@@ -15,6 +16,7 @@ class IdentityClient:
         self.wallet = wallet
         self.options = options or IdentityClientOptions()
         self.originator = originator
+        self.contacts_manager = ContactsManager(wallet)
 
     def _reveal_fields_from_master_certificate(self, certificate, fields_to_reveal):
         from bsv.auth.master_certificate import MasterCertificate
@@ -95,16 +97,27 @@ class IdentityClient:
         """
         Equivalent to the simple API in TypeScript/Go. Returns only the transaction ID.
         """
-        res = self.publicly_reveal_attributes(ctx, certificate, fields_to_reveal)
+        self.publicly_reveal_attributes(ctx, certificate, fields_to_reveal)
         # In the mock implementation, returns a zero TXID because actual txid cannot be obtained
         return "00" * 32
 
-    def resolve_by_identity_key(self, ctx: Any, args: Dict) -> List[DisplayableIdentity]:
+    def resolve_by_identity_key(self, ctx: Any, args: Dict, override_with_contacts: bool = True) -> List[DisplayableIdentity]:
         """
         Resolves certificates linked to the specified identity key and returns them as a DisplayableIdentity list.
         Connects to discover_by_identity_key in wallet/substrates.
         args: { 'identityKey': bytes|hex-str, 'limit'?: int, 'offset'?: int, 'seekPermission'?: bool }
+        override_with_contacts: If True, prioritize contacts over discovered identities
         """
+        identity_key = args.get('identityKey', '')
+        if isinstance(identity_key, bytes):
+            identity_key = identity_key.hex()
+        
+        # Check contacts first if override_with_contacts is True
+        if override_with_contacts:
+            contacts = self.contacts_manager.get_contacts(identity_key=identity_key)
+            if contacts:
+                return contacts
+        
         if self.wallet is None:
             return []
         try:
@@ -135,33 +148,56 @@ class IdentityClient:
         except Exception:
             return []
 
-    def resolve_by_attributes(self, ctx: Any, args: Dict) -> List[DisplayableIdentity]:
+    def resolve_by_attributes(self, ctx: Any, args: Dict, override_with_contacts: bool = True) -> List[DisplayableIdentity]:
         """
         Resolves certificates linked to the specified attributes and returns them as a DisplayableIdentity list.
         Connects to discover_by_attributes in wallet/substrates.
         args: { 'attributes': Dict[str,str], 'limit'?: int, 'offset'?: int, 'seekPermission'?: bool }
+        override_with_contacts: If True, prioritize contacts over discovered identities
         """
+        # Check contacts first if override_with_contacts is True
+        if override_with_contacts:
+            contacts = self._check_contacts_by_attributes(args)
+            if contacts:
+                return contacts
+        
         if self.wallet is None:
             return []
+        
         try:
-            if hasattr(self.wallet, 'discover_by_attributes'):
-                result = self.wallet.discover_by_attributes(ctx, args, self.originator)
-            else:
-                return []
-            certs = (result or {}).get('certificates', [])
-            identities: List[DisplayableIdentity] = []
-            from bsv.transaction.pushdrop import parse_pushdrop_locking_script, parse_identity_reveal
-            for item in certs:
-                locking = item.get('lockingScript') if isinstance(item, dict) else None
-                if isinstance(locking, (bytes, bytearray)):
-                    fields = parse_identity_reveal(parse_pushdrop_locking_script(locking))
-                    decrypted = self._maybe_decrypt_fields(ctx, fields)
-                    identities.append(self._from_kv(list(decrypted.items())))
-                else:
-                    identities.append(self.parse_identity(item))
-            return identities
+            certs = self._discover_certificates_by_attributes(ctx, args)
+            return self._parse_certificates_to_identities(ctx, certs)
         except Exception:
             return []
+
+    def _check_contacts_by_attributes(self, args: Dict) -> List[DisplayableIdentity]:
+        """Check contacts for matching attributes."""
+        attributes = args.get('attributes', {})
+        identity_key = attributes.get('identityKey')
+        if identity_key:
+            return self.contacts_manager.get_contacts(identity_key=identity_key)
+        return []
+
+    def _discover_certificates_by_attributes(self, ctx: Any, args: Dict) -> List[Dict]:
+        """Discover certificates by attributes using wallet."""
+        if hasattr(self.wallet, 'discover_by_attributes'):
+            result = self.wallet.discover_by_attributes(ctx, args, self.originator)
+            return (result or {}).get('certificates', [])
+        return []
+
+    def _parse_certificates_to_identities(self, ctx: Any, certs: List[Dict]) -> List[DisplayableIdentity]:
+        """Parse certificates into DisplayableIdentity list."""
+        from bsv.transaction.pushdrop import parse_pushdrop_locking_script, parse_identity_reveal
+        identities: List[DisplayableIdentity] = []
+        for item in certs:
+            locking = item.get('lockingScript') if isinstance(item, dict) else None
+            if isinstance(locking, (bytes, bytearray)):
+                fields = parse_identity_reveal(parse_pushdrop_locking_script(locking))
+                decrypted = self._maybe_decrypt_fields(ctx, fields)
+                identities.append(self._from_kv(list(decrypted.items())))
+            else:
+                identities.append(self.parse_identity(item))
+        return identities
 
     @staticmethod
     def parse_identity(identity: Any) -> DisplayableIdentity:
@@ -197,7 +233,7 @@ class IdentityClient:
 
     @staticmethod
     def _from_kv(fields: List[tuple]) -> DisplayableIdentity:
-        d = {k: v for k, v in (fields or [])}
+        d = dict(fields or [])
         name = d.get('name') or d.get('displayName') or 'Unknown'
         identity_key = d.get('identityKey') or ''
         abbreviated = f"{identity_key[:6]}…{identity_key[-4:]}" if isinstance(identity_key, str) and len(identity_key) >= 10 else ''

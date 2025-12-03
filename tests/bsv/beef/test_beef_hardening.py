@@ -6,36 +6,66 @@ def test_beef_unknown_version_errors():
     from bsv.transaction.beef import parse_beef
     # version=0xFFFFFFFF (unknown)
     data = (0xFFFFFFFF).to_bytes(4, 'little') + b"\x00\x00\x00\x00"
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match='unsupported BEEF version'):
         parse_beef(data)
 
 
 def test_atomic_subject_missing_returns_none_last_tx():
     """AtomicBEEF with missing subject tx should return None for last_tx (Go/TS parity)."""
-    from bsv.transaction.beef import ATOMIC_BEEF
+    from bsv.transaction.beef import ATOMIC_BEEF, BEEF_V2
     from bsv.transaction import parse_beef_ex
-    # Build Atomic with subject txid 0x33.. but empty inner
-    atomic = int(ATOMIC_BEEF).to_bytes(4, 'little') + (b"\x33" * 32) + b"\x00\x00\x00\x00"
-    try:
-        beef, subject, last_tx = parse_beef_ex(atomic)
-        assert subject == (b"\x33" * 32)[::-1].hex()
-        assert last_tx is None
-    except Exception:
-        # Accept failure for invalid inner; parser may raise
-        pass
+    
+    # Build Atomic with subject txid 0x33.. and valid empty BEEF V2 inner
+    # BEEF V2: version (4) + bumps count (1) + tx count (1) 
+    inner_beef = int(BEEF_V2).to_bytes(4, 'little') + b"\x00" + b"\x00"  # Empty BEEF V2
+    subject_txid = b"\x33" * 32
+    atomic = int(ATOMIC_BEEF).to_bytes(4, 'little') + subject_txid + inner_beef
+    
+    # Parse should succeed but last_tx should be None when subject is not in inner BEEF
+    beef, subject, last_tx = parse_beef_ex(atomic)
+    
+    # Verify subject txid is correctly extracted
+    expected_subject = subject_txid[::-1].hex()
+    assert subject == expected_subject, f"Expected subject {expected_subject}, got {subject}"
+    
+    # Verify last_tx is None when subject transaction is missing from inner BEEF
+    assert last_tx is None, "Expected last_tx to be None when subject is not found in inner BEEF"
+    
+    # Verify beef structure is valid
+    assert beef is not None, "BEEF should be parsed successfully"
+    assert hasattr(beef, 'txs'), "BEEF should have txs attribute"
+    assert len(beef.txs) == 0, "Inner BEEF should be empty"
 
 
 def test_beef_v2_txidonly_then_raw_deduplicate():
     """BEEF V2: TxIDOnly followed by RawTx for same txid should deduplicate (Go/TS parity)."""
     from bsv.transaction.beef import BEEF_V2, new_beef_from_bytes
-    # v2: bumps=0, txs=2 => TxIDOnly(aa), RawTx(empty invalid -> expect raise or skip)
-    v2 = int(BEEF_V2).to_bytes(4, 'little') + b"\x00" + b"\x02" + b"\x02" + (b"\xaa" * 32) + b"\x00" + b"\x00"
-    try:
-        beef = new_beef_from_bytes(v2)
-        # when parsed, either raise earlier or record one tx entry at most
-        assert len(beef.txs) <= 1
-    except Exception:
-        pass
+    from bsv.transaction import Transaction, TransactionOutput
+    from bsv.script.script import Script
+    
+    # Create a real transaction for testing
+    tx = Transaction()
+    tx.outputs = [TransactionOutput(Script(b"\x51"), 1000)]
+    txid_bytes = bytes.fromhex(tx.txid())[::-1]
+    
+    # Build BEEF V2 with TxIDOnly followed by RawTx for same txid
+    v2 = int(BEEF_V2).to_bytes(4, 'little')
+    v2 += b"\x00"  # bumps=0
+    v2 += b"\x02"  # txs=2
+    v2 += b"\x02" + txid_bytes  # TxIDOnly
+    v2 += b"\x00" + tx.serialize()  # RawTx (same txid)
+    
+    # Parse should succeed and deduplicate
+    beef = new_beef_from_bytes(v2)
+    
+    # Verify deduplication: should have only 1 entry for this txid
+    assert len(beef.txs) == 1, f"Expected 1 transaction after deduplication, got {len(beef.txs)}"
+    assert tx.txid() in beef.txs, f"Transaction {tx.txid()} should be in BEEF"
+    
+    # Verify the entry is the RawTx (not TxIDOnly)
+    beef_tx = beef.txs[tx.txid()]
+    assert beef_tx.tx_obj is not None, "Deduplicated entry should have full transaction object"
+    assert beef_tx.data_format == 0, "Should keep RawTx format (0), not TxIDOnly (2)"
 
 
 def test_beef_v2_truncated_bumps_and_txs():
@@ -43,11 +73,11 @@ def test_beef_v2_truncated_bumps_and_txs():
     from bsv.transaction.beef import BEEF_V2, new_beef_from_bytes
     # v2 with bumps=2 but no bump bytes
     v2_bad_bumps = int(BEEF_V2).to_bytes(4, 'little') + b"\x02"
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, TypeError)):
         new_beef_from_bytes(v2_bad_bumps)
     # v2 with bumps=0 and missing tx count
     v2_missing_txcount = int(BEEF_V2).to_bytes(4, 'little') + b"\x00"
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, TypeError)):
         new_beef_from_bytes(v2_missing_txcount)
 
 # --- Additional E2E/edge-case tests for BEEF/AtomicBEEF ---
@@ -77,7 +107,8 @@ def test_beef_v2_mixed_txidonly_and_rawtx_linking():
     # Both parent and child should be present, and child input should link to parent
     assert parent_id in beef.txs and child_id in beef.txs
     btx = beef.find_transaction_for_signing(child_id)
-    assert btx is not None and btx.tx_obj is not None
+    assert btx is not None
+    assert btx.tx_obj is not None
     assert btx.tx_obj.inputs[0].source_transaction is not None
     assert btx.tx_obj.inputs[0].source_transaction.txid() == parent_id
 
@@ -91,9 +122,11 @@ def test_beef_bump_normalization_merging():
         def compute_root(self):
             return self._root
         def combine(self, other):
-            self._root = self._root  # no-op for test
+            """Intentionally empty: test stub."""
+            pass  # NOSONAR
         def trim(self):
-            pass
+            """Intentionally empty: test stub."""
+            pass  # NOSONAR
     beef = Beef(version=BEEF_V2)
     beef.bumps = [DummyBump(100, b"root1"), DummyBump(100, b"root1"), DummyBump(101, b"root2")]
     # Add dummy txs with bump_index
@@ -118,9 +151,10 @@ def test_atomicbeef_nested_parsing():
     beef_bytes = t.to_beef()
     # Wrap as AtomicBEEF (subject=txid)
     atomic = int(ATOMIC_BEEF).to_bytes(4, 'little') + bytes.fromhex(t.txid())[::-1] + beef_bytes
-    beef, subject, last_tx = parse_beef_ex(atomic)
+    _, subject, last_tx = parse_beef_ex(atomic)
     assert subject == t.txid()
-    assert last_tx is not None and last_tx.txid() == t.txid()
+    assert last_tx is not None
+    assert last_tx.txid() == t.txid()
 
 
 def test_atomicbeef_deeply_nested():
@@ -136,9 +170,10 @@ def test_atomicbeef_deeply_nested():
     atomic1 = int(ATOMIC_BEEF).to_bytes(4, 'little') + bytes.fromhex(t.txid())[::-1] + beef_bytes
     atomic2 = int(ATOMIC_BEEF).to_bytes(4, 'little') + bytes.fromhex(t.txid())[::-1] + atomic1
     atomic3 = int(ATOMIC_BEEF).to_bytes(4, 'little') + bytes.fromhex(t.txid())[::-1] + atomic2
-    beef, subject, last_tx = parse_beef_ex(atomic3)
+    _, subject, last_tx = parse_beef_ex(atomic3)
     assert subject == t.txid()
-    assert last_tx is not None and last_tx.txid() == t.txid()
+    assert last_tx is not None
+    assert last_tx.txid() == t.txid()
 
 
 def test_beef_v2_bump_index_out_of_range():
@@ -147,21 +182,43 @@ def test_beef_v2_bump_index_out_of_range():
     # version, bumps=1, txs=1, kind=RawTxAndBumpIndex, bumpIndex=2 (invalid)
     v2 = int(BEEF_V2).to_bytes(4, 'little') + b"\x01" + b"\x00" + b"\x01" + b"\x01" + b"\x02" + b"\x00"
     import pytest
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, TypeError)):
         new_beef_from_bytes(v2)
 
 
 def test_beef_v2_txidonly_rawtx_duplicate_order():
     """BEEF V2: TxIDOnly, RawTx, TxIDOnly for same txid should deduplicate and not crash."""
     from bsv.transaction.beef import BEEF_V2, new_beef_from_bytes
-    txid = b"\xbb" * 32
-    v2 = int(BEEF_V2).to_bytes(4, 'little') + b"\x00" + b"\x03" + b"\x02" + txid + b"\x00" + b"\x01" + b"\x00" + b"\x02" + txid
-    try:
-        beef = new_beef_from_bytes(v2)
-        # Should not crash, and only one entry for txid
-        assert list(beef.txs.keys()).count(txid.hex()) <= 1
-    except Exception:
-        pass
+    from bsv.transaction import Transaction, TransactionOutput
+    from bsv.script.script import Script
+    
+    # Create a real transaction
+    tx = Transaction()
+    tx.outputs = [TransactionOutput(Script(b"\x51"), 1000)]
+    txid_bytes = bytes.fromhex(tx.txid())[::-1]
+    
+    # Build BEEF V2: TxIDOnly, RawTx, TxIDOnly (all same txid) - tests deduplication in various orders
+    v2 = int(BEEF_V2).to_bytes(4, 'little')
+    v2 += b"\x00"  # bumps=0
+    v2 += b"\x03"  # txs=3
+    v2 += b"\x02" + txid_bytes  # TxIDOnly
+    v2 += b"\x00" + tx.serialize()  # RawTx (same txid)
+    v2 += b"\x02" + txid_bytes  # TxIDOnly again
+    
+    # Parse should succeed and deduplicate
+    beef = new_beef_from_bytes(v2)
+    
+    # Should deduplicate to single entry
+    assert len(beef.txs) == 1, f"Expected 1 transaction after deduplication, got {len(beef.txs)}"
+    assert tx.txid() in beef.txs, f"Transaction {tx.txid()} should be in BEEF"
+    
+    # Verify only one occurrence in keys
+    txid_count = list(beef.txs.keys()).count(tx.txid())
+    assert txid_count == 1, f"TXID should appear exactly once in keys, found {txid_count}"
+    
+    # Verify we kept the RawTx (not TxIDOnly)
+    beef_tx = beef.txs[tx.txid()]
+    assert beef_tx.tx_obj is not None, "Should keep full transaction object, not just TxIDOnly"
 
 
 def test_beef_v2_extreme_tx_and_bump_count():
@@ -170,11 +227,11 @@ def test_beef_v2_extreme_tx_and_bump_count():
     # Large bump count (but no actual bump data)
     v2 = int(BEEF_V2).to_bytes(4, 'little') + b"\xFD\xFF\xFF"  # 0xFFFF bumps (truncated)
     import pytest
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, TypeError)):
         new_beef_from_bytes(v2)
     # Large tx count (but no actual tx data)
     v2 = int(BEEF_V2).to_bytes(4, 'little') + b"\x00" + b"\xFD\xFF\xFF"
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="unsupported tx data format"):
         new_beef_from_bytes(v2)
 
 
@@ -195,7 +252,7 @@ def test_atomicbeef_subject_not_in_inner():
     subject = b"\xdd" * 32
     v2 = int(4022206466).to_bytes(4, 'little') + b"\x00" + b"\x00"
     atomic = int(ATOMIC_BEEF).to_bytes(4, 'little') + subject + v2
-    beef, subj, last_tx = parse_beef_ex(atomic)
+    _, subj, last_tx = parse_beef_ex(atomic)
     assert subj == subject[::-1].hex()
     assert last_tx is None
 

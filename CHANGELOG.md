@@ -7,6 +7,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## Table of Contents
 
 - [Unreleased](#unreleased)
+- [1.0.11 - 2025-11-23](#1011---2025-11-23)
+- [1.0.10 - 2025-10-30](#1010---2025-10-30)
+- [1.0.9 - 2025-09-30](#109---2025-09-30)
 - [1.0.8 - 2025-08-13](#108---2025-08-13)
 - [1.0.7.1- 2025-07-28](#1071---2025-07-28)
 - [1.0.7- 2025-07-28](#107---2025-07-28)
@@ -23,26 +26,79 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - [0.1.0 - 2024-04-09](#010---2024-04-09)
 
 ---
-
-## [Unreleased]
+## [1.0.12] - 2025-11-25
 
 ### Added
-- (Include new features or significant user-visible enhancements here.)
+- Complete Wallet infrastructure with serializers, substrates, and implementations for full wallet functionality
+- Authentication system including peer authentication, certificates, session management, and HTTP transport
+- Enhanced BEEF infrastructure with dedicated builder, serializer, and validator modules for advanced transaction management
+- Script interpreter with comprehensive opcode support, stack operations, and script execution engine
+- Storage interfaces and implementations for data upload/download with encryption support
+- Overlay tools including lookup resolver, SHIP broadcaster, historian, and host reputation tracker
+- Registry client for overlay network management
+- Identity client with contacts manager for identity and contact management
+- Headers client for blockchain header synchronization
+- Keystore with local key-value store implementation supporting encrypted storage
+- Additional cryptographic primitives: Schnorr signatures, DRBG (Deterministic Random Bit Generator), AES-GCM encryption
+- Compatibility modules for BSM (Bitcoin Signed Message) and ECIES encryption
+- TOTP (Time-based One-Time Password) support for two-factor authentication
+- BIP-276 payment destination encoding support
+- PushDrop token protocol implementation
+- Teranode broadcaster support
 
 ### Changed
-- (Detail modifications that are non-breaking but relevant to the end-users.)
+- Refactored `bsv/utils.py` monolithic module into organized submodules under `bsv/utils/` for better maintainability
+- Enhanced broadcaster implementations with improved error handling and status categorization
+- Updated chain trackers with block headers service integration
+- Improved transaction handling with extended BEEF support and validation
+- Reorganized entire test suite into `tests/bsv/` structure with comprehensive coverage tests (455 files changed, 74,468+ additions)
 
-### Deprecated
-- (List features that are in the process of being phased out or replaced.)
+### Notes
+- **No breaking changes** - All existing APIs remain fully compatible
+- Legacy tests continue to pass but have been superseded by new comprehensive test structure
+- Test organization now follows a more modular and maintainable structure under `tests/bsv/`
+- Added extensive test coverage across all modules ensuring code quality and reliability
 
-### Removed
-- (Indicate features or capabilities that were taken out of the project.)
+---
+## [1.0.11] - 2025-11-23
+
+### Changed
+- Converted `LivePolicy` fee model from asynchronous to synchronous implementation
+- Replaced `default_http_client()` (async) with `default_sync_http_client()` (sync) in `LivePolicy`
+- **`Transaction.fee()` can now be called from both synchronous and asynchronous functions without any special handling**
+- Removed unused `asyncio` and `inspect` imports from `transaction.py`
+- Simplified `Transaction.fee()` implementation by removing async helper methods
 
 ### Fixed
-- (Document bugs that were fixed since the last release.)
+- Updated all `LivePolicy` tests to use synchronous mocks instead of `AsyncMock`
+- Fixed `test_transaction_fee_with_default_rate` to use explicit fee model for deterministic testing
+- Removed `asyncio.run()` calls from `LivePolicy` test suite
 
-### Security
-- (Notify of any improvements related to security vulnerabilities or potential risks.)
+### Notes
+- This change is transparent to users - `tx.fee()` works seamlessly in both sync and async contexts without any API changes
+- You can call `tx.fee()` inside `async def` functions or regular `def` functions - it works the same way
+- All existing code and documentation remain compatible with no modifications required
+
+---
+## [1.0.10] - 2025-10-30
+
+### Changed
+- Updated Script ASM output to use BRC-106 compliant format (outputs `OP_FALSE` instead of `OP_0` for better human readability)
+- Converted `test_arc_ef_or_rawhex.py` from unittest.TestCase to pytest style for better async test handling
+
+### Fixed
+- Added missing test dependencies to requirements.txt: `ecdsa~=0.19.0` and `pytest-cov~=6.0.0`
+- Fixed pytest configuration by adding `asyncio_default_fixture_loop_scope` to eliminate deprecation warnings
+- Updated test expectations in `test_scripts.py` to match BRC-106 compliant ASM output
+- Resolved all pytest warnings for a clean test output (154 tests passing with zero warnings)
+
+
+---
+## [1.0.9] - 2025-09-30
+
+### Added
+- Integrated `LivePolicy` for dynamic fee computations with caching and fallback mechanisms.
+ [ts-sdk#343](https://github.com/bsv-blockchain/ts-sdk/pull/343).
 
 ---
 ## [1.0.8] - 2025-08-13

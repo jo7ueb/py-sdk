@@ -1,6 +1,7 @@
 import struct
 from typing import List, Optional, Union
 import os
+from ..key_deriver import CounterpartyType
 
 class Writer:
     def __init__(self):
@@ -144,10 +145,8 @@ class Reader:
         return int(val & 0xFFFFFFFF)
 
     def read_optional_bytes(self) -> Optional[bytes]:
-        length = self.read_varint()
-        if length == (1 << 64) - 1 or length == 0:
-            return None
-        return self.read_bytes(length)
+        """Read optional bytes (alias for read_int_bytes for API compatibility)."""
+        return self.read_int_bytes()
 
     def read_string_slice(self) -> Optional[List[str]]:
         count = self.read_varint()
@@ -176,12 +175,12 @@ def _encode_key_related_params(w: Writer, params: dict):
     cp_val = params.get('counterparty')
     cp_bytes_param = params.get('counterparty_bytes')
     if cp_bytes_param or cp_val:
-        cp_type = 13  # OTHER
+        cp_type = CounterpartyType.OTHER
     else:
-        cp_type = params.get('counterparty_type', 0)
+        cp_type = params.get('counterparty_type', CounterpartyType.UNINITIALIZED)
 
     w.write_byte(cp_type)
-    if cp_type not in (0, 11, 12):
+    if cp_type not in (CounterpartyType.UNINITIALIZED, CounterpartyType.ANYONE, CounterpartyType.SELF):
         # Determine bytes
         cp_pub = cp_bytes_param
         if cp_pub is None:
@@ -204,7 +203,7 @@ def _decode_key_related_params(r: Reader) -> dict:
     key_id    = r.read_string()
     cp_type   = r.read_byte()
     cp_pub    = b''
-    if cp_type not in (0, 11, 12):
+    if cp_type not in (CounterpartyType.UNINITIALIZED, CounterpartyType.ANYONE, CounterpartyType.SELF):
         cp_pub = r.read_bytes(33)
     privileged = r.read_optional_bool()
     priv_reason = r.read_string()
@@ -338,7 +337,7 @@ def decode_outpoint(r: Reader) -> str:
 # Actions Serializers (Args only – Results TBD)
 # ==========================================================
 
-def serialize_create_action_args(args: dict) -> bytes:
+def serialize_create_action_args(args: dict) -> bytes:  # NOSONAR - Complexity (46), requires refactoring
     """Ported from Go SerializeCreateActionArgs / TS implementation."""
     w = Writer()
     # Description & inputBEEF
@@ -435,7 +434,7 @@ def deserialize_create_action_args(data: bytes) -> dict:
             unlocking = r.read_int_bytes()
             if unlocking is None:
                 # When optional, we consumed negative one earlier and len
-                unlocking_len = r.read_varint()
+                _ = r.read_varint()  # unlocking_len consumed but not used
             input_description = r.read_string()
             seq = r.read_varint()
             if seq == (1 << 64) - 1:

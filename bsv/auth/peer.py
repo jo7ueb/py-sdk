@@ -2,6 +2,7 @@ from typing import Callable, Dict, Optional, Any, Set
 import logging
 import json
 import base64
+import threading
 
 from .transports.transport import Transport
 # Re-export PeerSession for compatibility with session_manager typing/tests
@@ -63,7 +64,27 @@ class Peer:
             auto_persist_last_session: Whether to auto-persist sessions (default: True)
             logger: Optional logger instance
         """
-        # Support both PeerOptions object and direct parameters (ts-sdk style)
+        # Load configuration from PeerOptions or direct parameters
+        self._load_configuration(wallet, transport, certificates_to_request, session_manager, logger)
+        auto_persist_last_session = self._get_auto_persist_value(wallet, auto_persist_last_session)
+        
+        # Initialize callback registries and internal state
+        self._initialize_callbacks()
+        
+        # Apply defaults for optional parameters
+        self._apply_defaults(auto_persist_last_session)
+        
+        # Start the peer (register handlers, etc.)
+        self._initialize_peer()
+        
+        # Set protocol constants
+        self.FAIL_TO_GET_IDENTIFY_KEY = "failed to get identity key"
+        self.AUTH_MESSAGE_SIGNATURE = AUTH_PROTOCOL_ID
+        self.SESSION_NOT_FOUND = "Session not found"
+        self.FAILED_TO_GET_AUTHENTICATED_SESSION = "failed to get authenticated session"
+    
+    def _load_configuration(self, wallet, transport, certificates_to_request, session_manager, logger):
+        """Load configuration from either PeerOptions or direct parameters."""
         if isinstance(wallet, PeerOptions):
             # Legacy style: PeerOptions object
             cfg = wallet
@@ -72,7 +93,6 @@ class Peer:
             self.session_manager = cfg.session_manager
             self.certificates_to_request = cfg.certificates_to_request
             self.logger = cfg.logger or logging.getLogger("Auth Peer")
-            auto_persist_last_session = cfg.auto_persist_last_session
         else:
             # ts-sdk style: direct parameters
             if wallet is None:
@@ -84,58 +104,61 @@ class Peer:
             self.session_manager = session_manager
             self.certificates_to_request = certificates_to_request
             self.logger = logger or logging.getLogger("Auth Peer")
-        
-        # Initialize callback registries
+    
+    def _get_auto_persist_value(self, wallet, auto_persist_last_session):
+        """Extract auto_persist_last_session value from config or parameter."""
+        if isinstance(wallet, PeerOptions):
+            return wallet.auto_persist_last_session
+        return auto_persist_last_session
+    
+    def _initialize_callbacks(self):
+        """Initialize callback registries and internal state."""
         self.on_general_message_received_callbacks: Dict[int, Callable] = {}
         self.on_certificate_received_callbacks: Dict[int, Callable] = {}
         self.on_certificate_request_received_callbacks: Dict[int, Callable] = {}
         self.on_initial_response_received_callbacks: Dict[int, dict] = {}
         self.callback_id_counter = 0
+        self._callback_counter_lock = threading.Lock()
         self.last_interacted_with_peer = None
-
-        # Nonce management for replay protection
-        self._used_nonces = set()  # type: Set[str]
-        # Event handler registry
+        self._used_nonces = set()
         self._event_handlers: Dict[str, Callable[..., Any]] = {}
-        # Transport readiness flag (set by start())
         self._transport_ready = False
-
-        # Apply defaults for optional parameters
+    
+    def _apply_defaults(self, auto_persist_last_session):
+        """Apply default values for optional parameters."""
         if self.session_manager is None:
-            try:
-                from .session_manager import DefaultSessionManager
-                self.session_manager = DefaultSessionManager()
-            except Exception:
-                self.session_manager = None
+            self.session_manager = self._create_default_session_manager()
         
-        # Set auto_persist_last_session (default True unless explicitly False)
-        if auto_persist_last_session is None or auto_persist_last_session:
-            self.auto_persist_last_session = True
-        else:
-            self.auto_persist_last_session = False
+        self.auto_persist_last_session = auto_persist_last_session is None or auto_persist_last_session
         
         if self.certificates_to_request is None:
-            try:
-                from .requested_certificate_set import RequestedCertificateSet, RequestedCertificateTypeIDAndFieldList
-                self.certificates_to_request = RequestedCertificateSet(
-                    certifiers=[],
-                    certificate_types=RequestedCertificateTypeIDAndFieldList(),
-                )
-            except Exception:
-                # Fallback to a minimal dict structure if imports are unavailable
-                self.certificates_to_request = {
-                    'certifiers': [],
-                    'certificate_types': {}
-                }
-        # Start the peer (register handlers, etc.)
+            self.certificates_to_request = self._create_default_certificate_request()
+    
+    def _create_default_session_manager(self):
+        """Create default session manager."""
+        try:
+            from .session_manager import DefaultSessionManager
+            return DefaultSessionManager()
+        except Exception:
+            return None
+    
+    def _create_default_certificate_request(self):
+        """Create default certificate request structure."""
+        try:
+            from .requested_certificate_set import RequestedCertificateSet, RequestedCertificateTypeIDAndFieldList
+            return RequestedCertificateSet(
+                certifiers=[],
+                certificate_types=RequestedCertificateTypeIDAndFieldList(),
+            )
+        except Exception:
+            return {'certifiers': [], 'certificate_types': {}}
+    
+    def _initialize_peer(self):
+        """Initialize peer by starting transport."""
         try:
             self.start()
         except Exception as e:
             self.logger.warning(f"Failed to start peer: {e}")
-        self.FAIL_TO_GET_IDENTIFY_KEY = "failed to get identity key"
-        self.AUTH_MESSAGE_SIGNATURE = AUTH_PROTOCOL_ID
-        self.SESSION_NOT_FOUND = "Session not found"
-        self.FAILED_TO_GET_AUTHENTICATED_SESSION = "failed to get authenticated session"
 
     def start(self):
         """
@@ -230,7 +253,7 @@ class Peer:
         try:
             from .requested_certificate_set import RequestedCertificateSet
         except Exception:
-            RequestedCertificateSet = None  # type: ignore
+            RequestedCertificateSet = None  # type: ignore  # NOSONAR - Holds class type, PascalCase intentional
 
         if requested is None:
             return {"certifiers": [], "certificateTypes": {}}
@@ -247,7 +270,7 @@ class Peer:
                 certifiers, types_b64 = [], {}
 
             # Sort outputs deterministically
-            sorted_types = {k: sorted(list(v or [])) for k, v in types_b64.items()}
+            sorted_types = {k: sorted(v or []) for k, v in types_b64.items()}
             return {"certifiers": sorted(certifiers), "certificateTypes": sorted_types}
         except Exception:
             return {"certifiers": [], "certificateTypes": {}}
@@ -998,20 +1021,10 @@ class Peer:
             except Exception as e:
                 self.logger.warning(f"Certificate callback error: {e}")
 
-    def handle_general_message(self, ctx: Any, message: Any, sender_public_key: Any) -> Optional[Exception]:
-        """
-        Processes a general message.
-        """
-        # Short-circuit for loopback echo to allow tests with simplified wallets
-        # (skip nonce/signature verification when message originates from self)
-        if self._is_loopback_echo(ctx, sender_public_key):
-            return None
-
-        # Verify your_nonce (required for general messages, matches TypeScript/Go)
-        your_nonce = getattr(message, 'your_nonce', None)
+    def _verify_your_nonce(self, ctx: Any, your_nonce: Any) -> Optional[Exception]:
+        """Verify the your_nonce field."""
         if not your_nonce:
             return Exception("your_nonce is required for general message")
-
         try:
             from .utils import verify_nonce
             valid = verify_nonce(your_nonce, self.wallet, {'type': 1}, ctx)
@@ -1019,19 +1032,56 @@ class Peer:
                 return Exception("Unable to verify nonce for general message")
         except Exception as e:
             return Exception(f"Failed to validate nonce: {e}")
+        return None
 
+    def _log_signature_verification_failure(self, err: Exception, message: Any, session: Any, data_to_verify: Any) -> None:
+        """Log signature verification failure with diagnostic info."""
+        if self.logger:
+            try:
+                digest_preview = data_to_verify[:32].hex() if isinstance(data_to_verify, (bytes, bytearray)) else str(data_to_verify)[:64]
+                self.logger.warning(
+                    "General message signature verification failed",
+                    extra={
+                        "error": str(err),
+                        "nonce": getattr(message, 'nonce', None),
+                        "session_nonce": getattr(session, 'session_nonce', None),
+                        "payload_digest_head": digest_preview,
+                        "payload_len": len(data_to_verify) if isinstance(data_to_verify, (bytes, bytearray)) else None,
+                    }
+                )
+            except Exception:
+                self.logger.warning(f"General message signature verification failed: {err}")
+        else:
+            print(f"[AUTH DEBUG] General message signature verification failed: {err}")
+
+    def handle_general_message(self, ctx: Any, message: Any, sender_public_key: Any) -> Optional[Exception]:
+        """
+        Processes a general message.
+        """
+        # Short-circuit for loopback echo
+        if self._is_loopback_echo(ctx, sender_public_key):
+            return None
+
+        # Verify your_nonce
+        your_nonce = getattr(message, 'your_nonce', None)
+        err = self._verify_your_nonce(ctx, your_nonce)
+        if err:
+            return err
+
+        # Get session
         session = self.session_manager.get_session(sender_public_key.hex()) if sender_public_key else None
-        
         if session is None:
             return Exception(self.SESSION_NOT_FOUND)
 
+        # Verify signature
         payload = getattr(message, 'payload', None)
-        
         data_to_verify = self._serialize_for_signature(payload)
         err = self._verify_general_message_signature(ctx, message, session, sender_public_key, data_to_verify)
         if err is not None:
+            self._log_signature_verification_failure(err, message, session, data_to_verify)
             return err
 
+        # Update session
         self._touch_session(session)
         if self.auto_persist_last_session:
             self.last_interacted_with_peer = sender_public_key
@@ -1078,6 +1128,21 @@ class Peer:
             valid = bool(verify_result)
         
         if not valid:
+            if self.logger:
+                try:
+                    self.logger.warning(
+                        "Wallet verify_signature returned invalid",
+                        extra={
+                            "verify_result": getattr(verify_result, '__dict__', verify_result),
+                            "nonce": getattr(message, 'nonce', None),
+                            "session_nonce": session.session_nonce,
+                            "counterparty": getattr(sender_public_key, 'hex', lambda: sender_public_key)() if sender_public_key else None,
+                        }
+                    )
+                except Exception:
+                    self.logger.warning("Wallet verify_signature returned invalid")
+            else:
+                print("[AUTH DEBUG] Wallet verify_signature returned invalid")
             return Exception("general message - invalid signature")
         return None
 
@@ -1131,8 +1196,9 @@ class Peer:
         """
         Registers a callback for general messages. Returns a callback ID.
         """
-        callback_id = self.callback_id_counter
-        self.callback_id_counter += 1
+        with self._callback_counter_lock:
+            callback_id = self.callback_id_counter
+            self.callback_id_counter += 1
         self.on_general_message_received_callbacks[callback_id] = callback
         return callback_id
 
@@ -1147,8 +1213,9 @@ class Peer:
         """
         Registers a callback for certificate reception. Returns a callback ID.
         """
-        callback_id = self.callback_id_counter
-        self.callback_id_counter += 1
+        with self._callback_counter_lock:
+            callback_id = self.callback_id_counter
+            self.callback_id_counter += 1
         self.on_certificate_received_callbacks[callback_id] = callback
         return callback_id
 
@@ -1163,8 +1230,9 @@ class Peer:
         """
         Registers a callback for certificate requests. Returns a callback ID.
         """
-        callback_id = self.callback_id_counter
-        self.callback_id_counter += 1
+        with self._callback_counter_lock:
+            callback_id = self.callback_id_counter
+            self.callback_id_counter += 1
         self.on_certificate_request_received_callbacks[callback_id] = callback
         return callback_id
 
@@ -1225,13 +1293,14 @@ class Peer:
             initial_nonce=session_nonce,
             requested_certificates=self.certificates_to_request
         )
-        # Set up a simple timeout mechanism (not concurrent)
+        # Set up timeout mechanism with thread-safe callback registration
         import threading
         response_event = threading.Event()
         response_holder = {'session': None}
-        # Register a callback for the response (simplified)
-        callback_id = self.callback_id_counter
-        self.callback_id_counter += 1
+        # Register a callback for the response (thread-safe)
+        with self._callback_counter_lock:
+            callback_id = self.callback_id_counter
+            self.callback_id_counter += 1
         def on_initial_response(peer_nonce):
             session.peer_nonce = peer_nonce
             session.is_authenticated = True
@@ -1453,8 +1522,6 @@ class Peer:
         """
         Check nonce uniqueness and (optionally) expiry. Prevents replay attacks.
         """
-        import time
-        now = int(time.time())
         # Optionally, store (nonce, timestamp) for expiry logic
         if nonce in self._used_nonces:
             return False

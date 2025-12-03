@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypedDict, Dict, Union, List, Any
+from typing import Literal, TypedDict, Dict, Union, List, Any, Optional
 
 DefinitionType = Literal["basket", "protocol", "certificate"]
 
@@ -14,29 +14,29 @@ class CertificateFieldDescriptor(TypedDict):
 
 
 @dataclass
-class BasketDefinitionData:
+class BasketDefinitionData:  # NOSONAR - camelCase matches TS/Go registry API
     definitionType: Literal["basket"]
     basketID: str
     name: str
     iconURL: str
     description: str
     documentationURL: str
-    registryOperator: str | None = None
+    registryOperator: Optional[str] = None
 
 
 @dataclass
-class ProtocolDefinitionData:
+class ProtocolDefinitionData:  # NOSONAR - camelCase matches TS/Go registry API
     definitionType: Literal["protocol"]
     protocolID: Dict[str, Any]  # WalletProtocol-like: {securityLevel, protocol}
     name: str
     iconURL: str
     description: str
     documentationURL: str
-    registryOperator: str | None = None
+    registryOperator: Optional[str] = None
 
 
 @dataclass
-class CertificateDefinitionData:
+class CertificateDefinitionData:  # NOSONAR - camelCase matches TS/Go registry API
     definitionType: Literal["certificate"]
     type: str
     name: str
@@ -44,7 +44,7 @@ class CertificateDefinitionData:
     description: str
     documentationURL: str
     fields: Dict[str, CertificateFieldDescriptor]
-    registryOperator: str | None = None
+    registryOperator: Optional[str] = None
 
 
 DefinitionData = Union[
@@ -55,7 +55,7 @@ DefinitionData = Union[
 
 
 @dataclass
-class TokenData:
+class TokenData:  # NOSONAR - camelCase matches TS/Go registry API
     txid: str
     outputIndex: int
     satoshis: int
